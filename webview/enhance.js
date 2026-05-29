@@ -264,11 +264,7 @@
               // 修复 \operatorname 后面直接跟内容的情况
               fixed = fixed.replace(/\\operatorname\{(\w+)\}(\()/g, '\\operatorname{$1}$2');
 
-              return katex.renderToString(fixed, { displayMode: true, throwOnError: false, macros: {
-                "\\begin{cases}": "\\begin{cases}",
-                "\\end{cases}": "\\end{cases}",
-                "\\text": "\\text"
-              }});
+              return katex.renderToString(fixed, { displayMode: true, throwOnError: false });
             } catch { return match; }
           });
 
