@@ -196,118 +196,123 @@
     });
   }
 
-  // 渲染 LaTeX
+  // 占位符哨兵(私有区字符, 正文/公式中绝不出现): 数学段 / 不透明令牌
+  const MATH_SENT = '';
+  const TOK_SENT = '';
+
+  // KaTeX 渲染 + 常见语法兜底修复
+  function katexFix(formula, display) {
+    let fixed = formula;
+    // 矩阵换行: 单反斜杠+空格/换行 → 双反斜杠
+    fixed = fixed.replace(/\\\s*\n/g, '\\\\\n');
+    fixed = fixed.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
+    // 间距命令 \[x] → \\[x]
+    fixed = fixed.replace(/\\\[(\d+(?:\.\d+)?[a-z]*)\]/gi, '\\\\[$1]');
+    // cases 环境中的间距
+    fixed = fixed.replace(/&\s*\\\[6pt\]/g, '& \\\\');
+    // \sum{...} → \sum_{...}
+    fixed = fixed.replace(/\\(sum|prod|int|lim|inf|sup|max|min)\{([^}]+)\}/g, '\\$1_{$2}');
+    // \operatorname 后直接跟内容
+    fixed = fixed.replace(/\\operatorname\{(\w+)\}(\()/g, '\\operatorname{$1}$2');
+    return katex.renderToString(fixed, { displayMode: display, throwOnError: false });
+  }
+
+  // 把 Markdown 渲染后的子树「逆向重建」回 LaTeX 源串.
+  // Claude Code 自带 Markdown 在 KaTeX 之前先处理过正文, 会把数学块里的成对 `_`
+  // 当作 emphasis 吃掉并切碎节点. 这里 <em>x</em> → _x_、<strong>x</strong> → **x**、
+  // <br> → 换行, 借此还原被吃的下划线; 其它行内元素(<a>/<code>/已渲染 .katex)整体作为
+  // 不透明令牌保留, 渲染完再回填, 不破坏链接/代码/原有格式.
+  function reconstructInline(el, tokens) {
+    let src = '';
+    el.childNodes.forEach((child) => {
+      if (child.nodeType === 3) {
+        src += child.textContent;
+      } else if (child.nodeType === 1) {
+        const tag = child.tagName;
+        if (tag === 'EM' || tag === 'I') {
+          src += '_' + reconstructInline(child, tokens) + '_';
+        } else if (tag === 'STRONG' || tag === 'B') {
+          src += '**' + reconstructInline(child, tokens) + '**';
+        } else if (tag === 'BR') {
+          src += '\n';
+        } else {
+          const id = tokens.length;
+          tokens.push(child.outerHTML);
+          src += TOK_SENT + id + TOK_SENT;
+        }
+      }
+    });
+    return src;
+  }
+
+  // 从重建的源串渲染: 数学段 → KaTeX, 残留 markdown(**strong**/_em_) 复原,
+  // 令牌回填. 用私有区哨兵占位数学段/令牌, 避免互相误伤.
+  function renderBlockSource(src, tokens) {
+    const mathHtml = [];
+    let hasFormula = false;
+    const stash = (formula, display) => {
+      hasFormula = true;
+      try {
+        mathHtml.push(katexFix(formula, display));
+        return MATH_SENT + (mathHtml.length - 1) + MATH_SENT;
+      } catch {
+        return display ? '$$' + formula + '$$' : '$' + formula + '$';
+      }
+    };
+    let s = src;
+    s = s.replace(/\$\$([\s\S]+?)\$\$/g, (m, f) => stash(f, true));
+    s = s.replace(/\\\[([\s\S]+?)\\\]/g, (m, f) => stash(f, true));
+    s = s.replace(/\\\(([\s\S]+?)\\\)/g, (m, f) => stash(f.trim(), false));
+    s = s.replace(/\$([^$\n]+?)\$/g, (m, f) => {
+      const cleaned = f.trim().replace(/\s+/g, ' ');
+      const looksLikeLatex = cleaned.length <= 2 || /[\\_^{}]/.test(cleaned) ||
+        /\b(alpha|beta|gamma|delta|theta|lambda|mu|sigma|pi|omega|sum|int|frac|sqrt)\b/i.test(cleaned);
+      if (!looksLikeLatex) return m;
+      return stash(cleaned, false);
+    });
+    if (!hasFormula) return null;
+    // 非数学残留: 转义 HTML, 再复原行内 markdown, 最后回填占位
+    s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^A-Za-z0-9_])_([^_\n]+?)_(?![A-Za-z0-9_])/g, '$1<em>$2</em>');
+    s = s.replace(new RegExp(MATH_SENT + '(\\d+)' + MATH_SENT, 'g'), (m, i) => mathHtml[+i]);
+    s = s.replace(new RegExp(TOK_SENT + '(\\d+)' + TOK_SENT, 'g'), (m, i) => tokens[+i] || '');
+    return s;
+  }
+
+  // 渲染 LaTeX: 选「最内层」含公式的块容器, 整体重建后替换 innerHTML
   function renderLaTeX() {
     if (typeof katex === 'undefined') return;
     if (window._claudeRenderingLaTeX) return;
     window._claudeRenderingLaTeX = true;
-
+    const MATH_RE = /\$\$|\$|\\\(|\\\[/;
+    const REJECT = ['SCRIPT', 'STYLE', 'CODE', 'PRE', 'BUTTON', 'INPUT', 'TEXTAREA'];
     try {
-      const walker = document.createTreeWalker(
-        document.getElementById('root') || document.body,
-        NodeFilter.SHOW_TEXT,
-        {
-          acceptNode: (node) => {
-            const parent = node.parentNode;
-            if (!parent || parent.nodeType !== 1) return NodeFilter.FILTER_REJECT;
-            // 跳过已渲染的 KaTeX, 特殊标签, 和 session 列表
-            if (parent.classList?.contains('katex') ||
-                parent.closest('.katex') ||
-                parent.closest('[class*="sessionsList"]') ||
-                parent.closest('[class*="sessionItem"]') ||
-                parent.closest('[class*="sessionName"]') ||
-                ['SCRIPT', 'STYLE', 'CODE', 'PRE', 'BUTTON', 'INPUT', 'TEXTAREA'].includes(parent.tagName)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            const text = node.textContent;
-            if (text && (text.includes('$$') || text.includes('$') || text.includes('\\(') || text.includes('\\['))) {
-              return NodeFilter.FILTER_ACCEPT;
-            }
-            return NodeFilter.FILTER_REJECT;
-          }
+      const root = document.getElementById('root') || document.body;
+      const blocks = [];
+      const sel = 'p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, dd, dt, div, span';
+      root.querySelectorAll(sel).forEach((el) => {
+        if (REJECT.includes(el.tagName)) return;
+        if (el.closest('.katex') ||
+            el.closest('[class*="sessionsList"]') ||
+            el.closest('[class*="sessionItem"]') ||
+            el.closest('[class*="sessionName"]')) return;
+        const text = el.textContent;
+        if (!text || !MATH_RE.test(text)) return;
+        // 只取最内层: 若有子元素也含公式分隔符, 交给更深的块处理
+        for (const c of el.children) {
+          if (MATH_RE.test(c.textContent || '')) return;
         }
-      );
-
-      const nodesToRender = [];
-      let node;
-      while (node = walker.nextNode()) {
-        nodesToRender.push(node);
-      }
-
-      nodesToRender.forEach((textNode) => {
-        const text = textNode.textContent;
-        if (!text || !text.trim()) return;
-
+        blocks.push(el);
+      });
+      blocks.forEach((el) => {
         try {
-          let resultHTML = text;
-          let hasFormula = false;
-
-          // $$...$$ 块级公式 (保留换行, 矩阵需要)
-          resultHTML = resultHTML.replace(/\$\$([\s\S]+?)\$\$/g, (match, formula) => {
-            hasFormula = true;
-            try {
-              let fixed = formula;
-
-              // 修复矩阵换行: 单反斜杠+空格/换行 → 双反斜杠
-              fixed = fixed.replace(/\\\s*\n/g, '\\\\\n');
-              fixed = fixed.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
-
-              // 修复间距命令 \[x] → \\[x]
-              fixed = fixed.replace(/\\\[(\d+(?:\.\d+)?[a-z]*)\]/gi, '\\\\[$1]');
-
-              // 修复 cases 环境中的间距
-              fixed = fixed.replace(/&\s*\\\[6pt\]/g, '& \\\\');
-
-              // 修复常见语法错误: \sum{...} → \sum_{...}
-              fixed = fixed.replace(/\\(sum|prod|int|lim|inf|sup|max|min)\{([^}]+)\}/g, '\\$1_{$2}');
-
-              // 修复 \operatorname 后面直接跟内容的情况
-              fixed = fixed.replace(/\\operatorname\{(\w+)\}(\()/g, '\\operatorname{$1}$2');
-
-              return katex.renderToString(fixed, { displayMode: true, throwOnError: false, macros: {
-                "\\begin{cases}": "\\begin{cases}",
-                "\\end{cases}": "\\end{cases}",
-                "\\text": "\\text"
-              }});
-            } catch { return match; }
-          });
-
-          // \(...\) 行内公式
-          resultHTML = resultHTML.replace(/\\\(([\s\S]+?)\\\)/g, (match, formula) => {
-            hasFormula = true;
-            try {
-              return katex.renderToString(formula.trim(), { displayMode: false, throwOnError: false });
-            } catch { return match; }
-          });
-
-          // \[...\] 块级公式 (保留换行)
-          resultHTML = resultHTML.replace(/\\\[([\s\S]+?)\\\]/g, (match, formula) => {
-            hasFormula = true;
-            try {
-              return katex.renderToString(formula, { displayMode: true, throwOnError: false });
-            } catch { return match; }
-          });
-
-          // $...$ 行内公式 (支持多行, 自动清理换行)
-          resultHTML = resultHTML.replace(/\$([\s\S]+?)\$/g, (match, formula) => {
-            const content = formula.trim();
-            // 清理换行和多余空格, 保持一行
-            const cleaned = content.replace(/\s+/g, ' ').trim();
-            const looksLikeLatex = cleaned.length <= 2 || cleaned.includes('\\') ||
-              cleaned.includes('_') || cleaned.includes('^') || cleaned.includes('{') ||
-              /\b(alpha|beta|gamma|delta|theta|lambda|mu|sigma|pi|omega|sum|int|frac|sqrt)\b/i.test(cleaned);
-            if (!looksLikeLatex) return match;
-            hasFormula = true;
-            try {
-              let fixed = cleaned.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
-              return katex.renderToString(fixed, { displayMode: false, throwOnError: false });
-            } catch { return match; }
-          });
-
-          if (hasFormula && resultHTML !== text && resultHTML.includes('katex')) {
-            const span = document.createElement('span');
-            span.innerHTML = resultHTML;
-            textNode.parentNode.replaceChild(span, textNode);
+          const tokens = [];
+          const src = reconstructInline(el, tokens);
+          if (!MATH_RE.test(src)) return;
+          const html = renderBlockSource(src, tokens);
+          if (html && html.includes('katex')) {
+            el.innerHTML = html;
           }
         } catch (e) {}
       });
