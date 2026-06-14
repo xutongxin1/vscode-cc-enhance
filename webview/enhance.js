@@ -203,9 +203,11 @@
   // KaTeX 渲染 + 常见语法兜底修复
   function katexFix(formula, display) {
     let fixed = formula;
-    // 矩阵换行: 单反斜杠+空格/换行 → 双反斜杠
+    // 矩阵换行: 单反斜杠+换行 → 双反斜杠
     fixed = fixed.replace(/\\\s*\n/g, '\\\\\n');
-    fixed = fixed.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
+    // 单反斜杠+空格 → 双反斜杠 (markdown 把换行用的 \\ 吃成单个 \).
+    // (?<!\\) 保证不碰已经正确的 \\; 前瞻里加入 \\ 以覆盖「换行后紧跟 \命令」(如 \\ \lambda).
+    fixed = fixed.replace(/(?<!\\)\\ (?=[a-zA-Z0-9_{}\\])/g, '\\\\ ');
     // 间距命令 \[x] → \\[x]
     fixed = fixed.replace(/\\\[(\d+(?:\.\d+)?[a-z]*)\]/gi, '\\\\[$1]');
     // cases 环境中的间距
@@ -214,6 +216,12 @@
     fixed = fixed.replace(/\\(sum|prod|int|lim|inf|sup|max|min)\{([^}]+)\}/g, '\\$1_{$2}');
     // \operatorname 后直接跟内容
     fixed = fixed.replace(/\\operatorname\{(\w+)\}(\()/g, '\\operatorname{$1}$2');
+    // \left\{ \right\} 的反斜杠被 markdown 吃掉成 \left{ \right} → 补回定界符前的反斜杠
+    fixed = fixed.replace(/\\left\{/g, '\\left\\{');
+    fixed = fixed.replace(/\\right\}/g, '\\right\\}');
+    // 结尾孤立的 \left / \right 缺定界符 → 补空定界符 \left. / \right. (否则 KaTeX 报错)
+    fixed = fixed.replace(/\\left(?=\s*$)/g, '\\left.');
+    fixed = fixed.replace(/\\right(?=\s*$)/g, '\\right.');
     return katex.renderToString(fixed, { displayMode: display, throwOnError: false });
   }
 
