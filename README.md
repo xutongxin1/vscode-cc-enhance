@@ -15,12 +15,12 @@
 
 ## 兼容版本
 
-- Claude Code Extension: **2.1.31**
-- 平台: Windows (win32-x64), Linux (linux-x64)
+- Claude Code Extension: **2.1.31~2.1.177+**
+- 平台: Windows (win32-x64), Linux (linux-x64)，WSL2 (win32-x64)  **兼容桌面GUI和vscode-server**
 
 ## 安装
 
-### 方式一: 补丁脚本 (推荐)
+### 补丁脚本
 
 ```bash
 cd claude-code-enhance
@@ -32,12 +32,6 @@ node patch_extension.js
 2. 复制 enhance.js 到扩展目录
 3. 修改 CSP 策略允许加载 CDN 资源
 4. 注入增强脚本
-
-### 方式二: 手动安装
-
-1. 复制 `webview/enhance.js` 到扩展的 `webview/` 目录
-2. 修改 `extension.js` 中的 CSP 策略
-3. 在 HTML 模板中注入 enhance.js 脚本标签
 
 ## 安装后
 
